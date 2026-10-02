@@ -1,0 +1,7 @@
+# Changelog
+
+## [NEXT_VERSION] - [UNRELEASED]
+* FEA: Sync - Send the FPP playback position from MultiSync to the Listen Sync relay over an outbound WebSocket, stamped on the relay clock with an NTP-style offset.
+* FEA: Playlist - Send the audio files of the running playlist so listeners can download the next song early.
+* FEA: Media - Upload new and changed audio files from the Music folder to the relay, checked on connect and every 15 minutes.
+* FEA: Status page - Show the relay connection, round trip, current position and upload progress, and save the relay token to plugindata.

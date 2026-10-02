@@ -1,0 +1,42 @@
+{
+    "repoName": "fpp-plugin-listen-sync",
+    "name": "Listen Sync",
+    "author": "David Baumwald (dream-encode)",
+    "description": "Sends the show playback position to a Listen Sync relay and uploads the show audio files to it, so phones and browsers can play the audio in sync with the lights.",
+    "homeURL": "https://github.com/LightsOn14th/fpp-plugin-listen-sync",
+    "srcURL": "https://github.com/LightsOn14th/fpp-plugin-listen-sync.git",
+    "bugURL": "https://github.com/LightsOn14th/fpp-plugin-listen-sync/issues",
+    "allowUpdates": 1,
+    "releaseNotesStyle": "gitHistory",
+    "privacy": {
+        "summary": "Sends the current song name and playback position, and copies of the audio files in the Music folder, to the relay address you enter. Keeps nothing about anyone.",
+        "sends": [
+            {
+                "to": "the relay address you enter",
+                "what": "current song file name, playback position and playlist song names",
+                "why": "so listeners can play the audio in sync with the show",
+                "alwaysOn": false
+            },
+            {
+                "to": "the relay address you enter",
+                "what": "audio files from the FPP Music folder",
+                "why": "so listeners can download the audio before it plays",
+                "alwaysOn": false
+            }
+        ],
+        "collects": [],
+        "sensors": [],
+        "remoteAccess": "none",
+        "systemChanges": [],
+        "closedCode": false,
+        "other": "The relay token is kept in plugindata/fpp-plugin-listen-sync/ and removed on uninstall. Nothing is sent until a relay token is saved on the plugin page. Position data comes from FPP MultiSync, which must be enabled."
+    },
+    "versions": [
+        {
+            "minFPPVersion": "10.0",
+            "maxFPPVersion": "0",
+            "branch": "main",
+            "sha": ""
+        }
+    ]
+}
