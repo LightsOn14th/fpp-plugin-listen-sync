@@ -70,7 +70,7 @@ $pluginName = 'fpp-plugin-listen-sync';
 
 <script type="text/javascript">
 ( function () {
-    var API = '/api/plugin-apis/ListenSync';
+    var API = 'plugin.php?plugin=fpp-plugin-listen-sync&page=ajax.php&nopage=1&action=';
 
     function text( id, value ) {
         document.getElementById( id ).textContent = value;
@@ -81,13 +81,13 @@ $pluginName = 'fpp-plugin-listen-sync';
     }
 
     function render( status ) {
-        text( 'lsConnection', status.enabled ? status.connection : 'disabled' );
+        text( 'lsConnection', ! status.daemonRunning ? 'daemon not running' : ( status.enabled ? status.connection : 'disabled' ) );
         text( 'lsLastError', status.lastError || '-' );
         text( 'lsRtt', ms( status.rttMs ) );
-        text( 'lsNow', status.playing ? status.file + ' at ' + status.position.toFixed( 1 ) + ' s' : 'Not playing' );
+        text( 'lsNow', status.playing && status.position !== null ? status.file + ' at ' + status.position.toFixed( 1 ) + ' s' : 'Not playing' );
         text( 'lsPlaylist', status.playlist ? status.playlist + ' (' + status.playlistItems + ' audio files)' : '-' );
 
-        var upload = status.upload;
+        var upload = status.upload || { state: '-', done: 0, total: 0, error: '' };
         var uploadText = status.uploadMedia ? upload.state : 'off';
 
         if ( upload.total > 0 ) {
@@ -104,8 +104,8 @@ $pluginName = 'fpp-plugin-listen-sync';
     }
 
     function refresh() {
-        $.get( API + '/status' ).done( render ).fail( function () {
-            text( 'lsConnection', 'plugin not loaded' );
+        $.get( API + 'status' ).done( render ).fail( function () {
+            text( 'lsConnection', 'status not available' );
         } );
     }
 
@@ -117,7 +117,7 @@ $pluginName = 'fpp-plugin-listen-sync';
             return;
         }
 
-        $.ajax( { url: API + '/token', method: 'POST', data: value, contentType: 'text/plain', processData: false } )
+        $.ajax( { url: API + 'token', method: 'POST', data: value, contentType: 'text/plain', processData: false } )
             .done( function ( status ) {
                 input.value = '';
                 render( status );
@@ -129,7 +129,7 @@ $pluginName = 'fpp-plugin-listen-sync';
     } );
 
     document.getElementById( 'lsUploadNow' ).addEventListener( 'click', function () {
-        $.post( API + '/upload' ).done( render );
+        $.post( API + 'upload' ).done( render );
     } );
 
     refresh();

@@ -19,7 +19,7 @@
     <ul>
         <li>Only audio files in the Music folder are uploaded (mp3, m4a, aac, ogg, opus, wav, flac). Video files are not supported.</li>
         <li>The relay token is stored in plugindata/fpp-plugin-listen-sync/ and is removed when the plugin is uninstalled.</li>
-        <li>Plugin messages are written to the fppd log under the Plugin facility.</li>
+        <li>Network traffic runs in a separate background process, never inside fppd. Its messages are written to logs/plugin-fpp-plugin-listen-sync.log.</li>
     </ul>
 
     <p>

@@ -29,7 +29,7 @@
         "remoteAccess": "none",
         "systemChanges": [],
         "closedCode": false,
-        "other": "The relay token is kept in plugindata/fpp-plugin-listen-sync/ and removed on uninstall. Nothing is sent until a relay token is saved on the plugin page. Position data comes from FPP MultiSync, which must be enabled."
+        "other": "Network traffic runs in a separate background process (listen_sync_daemon.py), started when fppd starts and stopped when it stops, never inside fppd. The relay token and a status file are kept in plugindata/fpp-plugin-listen-sync/ and removed on uninstall. Nothing is sent until a relay token is saved on the plugin page. Position data comes from FPP MultiSync, which must be enabled."
     },
     "versions": [
         {
@@ -38,5 +38,10 @@
             "branch": "main",
             "sha": ""
         }
-    ]
+    ],
+    "dependencies": {
+        "packages": [
+            "python3-websockets"
+        ]
+    }
 }

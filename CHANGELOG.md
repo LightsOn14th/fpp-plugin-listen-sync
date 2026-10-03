@@ -7,3 +7,4 @@
 * FEA: Status page - Show the relay connection, round trip, current position and upload progress, and save the relay token to plugindata.
 * BUG: Stability - Read playlist, media list and relay JSON with type checks, and catch errors on every plugin thread, so an unexpected response (an on-the-fly playlist, or `sizeBytes` sent as a string) no longer aborts fppd.
 * BUG: Settings - Skip playlist lookups and uploads while the plugin is disabled.
+* BUG: Stability - Move all networking (relay WebSocket, playlist lookups, uploads) out of fppd into a separate daemon process that restarts itself, so a network, TLS or HTTP error can no longer abort fppd. The part inside fppd only sends local UDP datagrams and starts no threads.

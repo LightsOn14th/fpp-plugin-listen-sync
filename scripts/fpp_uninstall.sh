@@ -5,7 +5,10 @@
 : "${FPPDIR:=/opt/fpp}"
 . "${FPPDIR}/scripts/common"
 
-# The relay token is the only thing kept outside the plugin directory.
+bash "$(dirname "$0")/preStop.sh"
+
+# The relay token, status file and daemon pid are the only things kept outside
+# the plugin directory.
 rm -rf "${MEDIADIR}/plugindata/fpp-plugin-listen-sync"
 
 # No restartFlag: the Plugin Manager unloads the plugin through fppd before it
