@@ -42,6 +42,10 @@ UPLOAD_REQUEST_FILE = os.path.join(DATA_DIR, 'upload-request')
 LOCAL_API = os.environ.get('LISTEN_SYNC_LOCAL_API', 'http://127.0.0.1')
 
 UDP_PORT = 39117
+
+# Cloudflare blocks the default "Python-urllib" user agent (error 1010), so
+# every HTTP request identifies itself as the plugin instead.
+USER_AGENT = 'fpp-plugin-listen-sync'
 DEFAULT_RELAY = 'https://listen.lightson14th.com'
 AUDIO_EXTENSIONS = {'aac', 'flac', 'm4a', 'mp3', 'ogg', 'opus', 'wav'}
 
@@ -521,7 +525,7 @@ class Daemon:
 # ---- blocking helpers (run in worker threads) ----------------------------------
 
 def http_get_json(url, headers=None, timeout=LOCAL_TIMEOUT_S):
-    request = urllib.request.Request(url, headers=headers or {})
+    request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, **(headers or {})})
 
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode('utf-8', errors='replace'))
@@ -637,7 +641,9 @@ def upload_one(relay_url, token, name, version):
     quoted = urllib.parse.quote(name, safe='')
 
     with tempfile.TemporaryFile(dir=DATA_DIR) as temp:
-        with urllib.request.urlopen(LOCAL_API + '/api/file/Music/' + quoted, timeout=RELAY_TIMEOUT_S) as source:
+        download = urllib.request.Request(LOCAL_API + '/api/file/Music/' + quoted, headers={'User-Agent': USER_AGENT})
+
+        with urllib.request.urlopen(download, timeout=RELAY_TIMEOUT_S) as source:
             while True:
                 chunk = source.read(1 << 16)
 
@@ -655,6 +661,7 @@ def upload_one(relay_url, token, name, version):
             method='PUT',
             headers={
                 'Authorization': 'Bearer ' + token,
+                'User-Agent': USER_AGENT,
                 'Content-Length': str(size),
                 'Content-Type': 'application/octet-stream',
             },
