@@ -5,3 +5,5 @@
 * FEA: Playlist - Send the audio files of the running playlist so listeners can download the next song early.
 * FEA: Media - Upload new and changed audio files from the Music folder to the relay, checked on connect and every 15 minutes.
 * FEA: Status page - Show the relay connection, round trip, current position and upload progress, and save the relay token to plugindata.
+* BUG: Stability - Read playlist, media list and relay JSON with type checks, and catch errors on every plugin thread, so an unexpected response (an on-the-fly playlist, or `sizeBytes` sent as a string) no longer aborts fppd.
+* BUG: Settings - Skip playlist lookups and uploads while the plugin is disabled.

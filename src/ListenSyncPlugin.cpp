@@ -84,6 +84,86 @@ std::string trim( const std::string& value ) {
     return value.substr( start, end - start + 1 );
 }
 
+// ---- type-safe JSON reads ---------------------------------------------------
+//
+// jsoncpp throws Json::LogicError when a value is read as the wrong type (for
+// example isMember() or operator[] on an array, or asLargestInt() on a string).
+// An uncaught exception on a plugin thread aborts all of fppd, so every read of
+// JSON this plugin did not build itself goes through these helpers.
+
+/**
+ * The member `key` of `object`, or a null value when `object` is not an object.
+ */
+const Json::Value& jsonMember( const Json::Value& object, const char* key ) {
+    static const Json::Value null;
+
+    if ( ! object.isObject() ) {
+        return null;
+    }
+
+    const Json::Value* found = object.find( key, key + strlen( key ) );
+
+    return found ? *found : null;
+}
+
+/**
+ * A string member, or `fallback` when missing or not a string.
+ */
+std::string jsonString( const Json::Value& object, const char* key, const std::string& fallback = "" ) {
+    const Json::Value& value = jsonMember( object, key );
+
+    return value.isString() ? value.asString() : fallback;
+}
+
+/**
+ * A number member that may also arrive as a numeric string (FPP sends
+ * `sizeBytes` as a string on 64-bit systems), or `fallback`.
+ */
+long long jsonInteger( const Json::Value& object, const char* key, long long fallback = -1 ) {
+    const Json::Value& value = jsonMember( object, key );
+
+    if ( value.isIntegral() ) {
+        return value.asLargestInt();
+    }
+
+    if ( value.isDouble() ) {
+        return (long long)value.asDouble();
+    }
+
+    if ( value.isString() ) {
+        const std::string text = value.asString();
+        char* end = nullptr;
+        long long parsed = strtoll( text.c_str(), &end, 10 );
+
+        return end && end != text.c_str() && *end == '\0' ? parsed : fallback;
+    }
+
+    return fallback;
+}
+
+/**
+ * A numeric member as a double, or `fallback`.
+ */
+double jsonNumber( const Json::Value& object, const char* key, double fallback ) {
+    const Json::Value& value = jsonMember( object, key );
+
+    return value.isNumeric() ? value.asDouble() : fallback;
+}
+
+/**
+ * Run `fn`, logging instead of propagating any exception. Used around every
+ * piece of plugin code that runs on a thread or callback fppd does not own.
+ */
+void guarded( const char* where, const std::function<void()>& fn ) {
+    try {
+        fn();
+    } catch ( const std::exception& error ) {
+        LogErr( VB_PLUGIN, "ListenSync: error in %s: %s\n", where, error.what() );
+    } catch ( ... ) {
+        LogErr( VB_PLUGIN, "ListenSync: unknown error in %s\n", where );
+    }
+}
+
 std::string lowerExtension( const std::string& file ) {
     size_t dot = file.find_last_of( '.' );
 
@@ -309,7 +389,7 @@ public:
 
         MultiSync::INSTANCE.addMultiSyncPlugin( this );
 
-        loop->queueInLoop( [this]() {
+        queue( [this]() {
             startTimers();
             connect();
         } );
@@ -400,28 +480,37 @@ public:
 
     virtual void playlistCallback( const Json::Value& playlist, const std::string& action,
                                    const std::string& section, int item ) override {
-        if ( action != "start" && action != "playing" ) {
-            return;
-        }
-
-        std::string name = playlist.get( "name", "" ).asString();
-
-        if ( name.empty() ) {
-            return;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock( mutex );
-
-            if ( name == playlistName ) {
+        // Runs on an fppd playlist thread: never let anything escape.
+        guarded( "playlistCallback", [&]() {
+            if ( action != "start" && action != "playing" ) {
                 return;
             }
 
-            playlistName = name;
-            playlistRequested = name;
-        }
+            std::string name = jsonString( playlist, "name" );
 
-        workerCv.notify_all();
+            if ( name.empty() ) {
+                return;
+            }
+
+            // The media of the entry that is starting, used when the playlist
+            // itself cannot be read (e.g. an on-the-fly playlist FPP generates
+            // when a sequence is played directly).
+            std::string media = jsonString( jsonMember( playlist, "currentEntry" ), "mediaName" );
+
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+
+                if ( name == playlistName ) {
+                    return;
+                }
+
+                playlistName = name;
+                playlistRequested = name;
+                playlistFallbackMedia = media;
+            }
+
+            workerCv.notify_all();
+        } );
     }
 
     // ---- APIProviderPlugin ------------------------------------------------
@@ -498,25 +587,33 @@ private:
 
     void queue( std::function<void()> fn ) {
         if ( loop && ! stopping ) {
-            loop->queueInLoop( std::move( fn ) );
+            loop->queueInLoop( [fn = std::move( fn )]() {
+                guarded( "event loop task", fn );
+            } );
         }
     }
 
+    void every( double seconds, const char* where, std::function<void()> fn ) {
+        timers.push_back( loop->runEvery( seconds, [where, fn = std::move( fn )]() {
+            guarded( where, fn );
+        } ) );
+    }
+
     void startTimers() {
-        timers.push_back( loop->runEvery( SAMPLE_INTERVAL_S, [this]() {
+        every( SAMPLE_INTERVAL_S, "sample timer", [this]() {
             sendSample();
-        } ) );
-        timers.push_back( loop->runEvery( PING_INTERVAL_S, [this]() {
+        } );
+        every( PING_INTERVAL_S, "ping timer", [this]() {
             sendPing();
-        } ) );
-        timers.push_back( loop->runEvery( HEARTBEAT_INTERVAL_S, [this]() {
+        } );
+        every( HEARTBEAT_INTERVAL_S, "heartbeat timer", [this]() {
             Json::Value message;
             message[ "type" ] = "hb";
             send( message );
-        } ) );
-        timers.push_back( loop->runEvery( UPLOAD_INTERVAL_S, [this]() {
+        } );
+        every( UPLOAD_INTERVAL_S, "upload timer", [this]() {
             requestUpload();
-        } ) );
+        } );
     }
 
     void stopEverything() {
@@ -545,12 +642,14 @@ private:
             std::future<void> done = tornDown->get_future();
 
             loop->runInLoop( [this, tornDown]() {
-                for ( auto id : timers ) {
-                    loop->invalidateTimer( id );
-                }
+                guarded( "shutdown", [this]() {
+                    for ( auto id : timers ) {
+                        loop->invalidateTimer( id );
+                    }
 
-                timers.clear();
-                closeSocket();
+                    timers.clear();
+                    closeSocket();
+                } );
                 tornDown->set_value();
             } );
 
@@ -609,38 +708,44 @@ private:
 
         client->setMessageHandler( [this, raw]( const std::string& message, const drogon::WebSocketClientPtr&,
                                                 const drogon::WebSocketMessageType& type ) {
-            if ( socket.get() == raw && type == drogon::WebSocketMessageType::Text ) {
-                onMessage( message );
-            }
+            guarded( "relay message", [&]() {
+                if ( socket.get() == raw && type == drogon::WebSocketMessageType::Text ) {
+                    onMessage( message );
+                }
+            } );
         } );
 
         client->setConnectionClosedHandler( [this, raw]( const drogon::WebSocketClientPtr& ) {
-            if ( socket.get() == raw ) {
-                onClosed( "connection closed" );
-            }
+            guarded( "relay close", [&]() {
+                if ( socket.get() == raw ) {
+                    onClosed( "connection closed" );
+                }
+            } );
         } );
 
         socket = client;
 
         client->connectToServer( request, [this, raw]( drogon::ReqResult result, const drogon::HttpResponsePtr& response,
                                                        const drogon::WebSocketClientPtr& ) {
-            if ( socket.get() != raw ) {
-                return;
-            }
+            guarded( "relay connect", [&]() {
+                if ( socket.get() != raw ) {
+                    return;
+                }
 
-            if ( result == drogon::ReqResult::Ok ) {
-                onOpen();
+                if ( result == drogon::ReqResult::Ok ) {
+                    onOpen();
 
-                return;
-            }
+                    return;
+                }
 
-            std::string reason = reqResultName( result );
+                std::string reason = reqResultName( result );
 
-            if ( response ) {
-                reason += " (HTTP " + std::to_string( (int)response->statusCode() ) + ")";
-            }
+                if ( response ) {
+                    reason += " (HTTP " + std::to_string( (int)response->statusCode() ) + ")";
+                }
 
-            onClosed( reason );
+                onClosed( reason );
+            } );
         } );
     }
 
@@ -658,7 +763,9 @@ private:
 
         for ( int i = 0; i < PING_BURST; i++ ) {
             loop->runAfter( 0.1 * i, [this]() {
-                sendPing();
+                guarded( "ping", [this]() {
+                    sendPing();
+                } );
             } );
         }
 
@@ -688,11 +795,13 @@ private:
         double delay = std::min( 30.0, (double)( 1 << std::min( attempt, 5 ) ) );
 
         loop->runAfter( delay, [this]() {
-            reconnectPending = false;
+            guarded( "reconnect", [this]() {
+                reconnectPending = false;
 
-            if ( ! socket ) {
-                connect();
-            }
+                if ( ! socket ) {
+                    connect();
+                }
+            } );
         } );
     }
 
@@ -722,10 +831,19 @@ private:
             return;
         }
 
-        if ( message.get( "type", "" ).asString() == "pong" ) {
-            std::lock_guard<std::mutex> lock( mutex );
-            clock.add( message[ "t0" ].asDouble(), message[ "ts" ].asDouble(), received );
+        if ( jsonString( message, "type" ) != "pong" ) {
+            return;
         }
+
+        double t0 = jsonNumber( message, "t0", -1 );
+        double ts = jsonNumber( message, "ts", -1 );
+
+        if ( t0 < 0 || ts < 0 ) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock( mutex );
+        clock.add( t0, ts, received );
     }
 
     void send( const Json::Value& message ) {
@@ -812,6 +930,7 @@ private:
     void workerMain() {
         while ( true ) {
             std::string playlist;
+            std::string fallbackMedia;
             bool upload = false;
 
             {
@@ -825,16 +944,32 @@ private:
                 }
 
                 playlist.swap( playlistRequested );
+                fallbackMedia = playlistFallbackMedia;
                 upload = uploadRequested;
                 uploadRequested = false;
             }
 
+            bool active = false;
+
+            {
+                std::lock_guard<std::mutex> lock( mutex );
+                active = enabled;
+            }
+
+            if ( ! active ) {
+                continue;
+            }
+
             if ( ! playlist.empty() ) {
-                fetchPlaylist( playlist );
+                guarded( "fetchPlaylist", [&]() {
+                    fetchPlaylist( playlist, fallbackMedia );
+                } );
             }
 
             if ( upload ) {
-                uploadMissingMedia();
+                guarded( "uploadMissingMedia", [&]() {
+                    uploadMissingMedia();
+                } );
             }
         }
     }
@@ -845,41 +980,11 @@ private:
         return drogon::HttpClient::newHttpClient( host, loop );
     }
 
-    void fetchPlaylist( const std::string& name ) {
-        auto client = newClient( LOCAL_API );
-        auto request = drogon::HttpRequest::newHttpRequest();
+    void fetchPlaylist( const std::string& name, const std::string& fallbackMedia ) {
+        std::vector<std::string> items = readPlaylistMedia( name );
 
-        request->setPathEncode( false );
-        request->setPath( "/api/playlist/" + percentEncode( name ) );
-
-        auto [ result, response ] = client->sendRequest( request, HTTP_TIMEOUT_S );
-
-        if ( result != drogon::ReqResult::Ok || ! response || response->statusCode() != drogon::k200OK ) {
-            LogWarn( VB_PLUGIN, "ListenSync: could not read playlist %s\n", name.c_str() );
-
-            return;
-        }
-
-        Json::Value root;
-
-        if ( ! LoadJsonFromString( std::string( response->body() ), root ) ) {
-            return;
-        }
-
-        std::vector<std::string> items;
-
-        for ( const char* section : { "leadIn", "mainPlaylist", "leadOut" } ) {
-            if ( ! root.isMember( section ) || ! root[ section ].isArray() ) {
-                continue;
-            }
-
-            for ( const Json::Value& entry : root[ section ] ) {
-                std::string media = entry.get( "mediaName", "" ).asString();
-
-                if ( ! media.empty() ) {
-                    items.push_back( media );
-                }
-            }
+        if ( items.empty() && ! fallbackMedia.empty() ) {
+            items.push_back( fallbackMedia );
         }
 
         {
@@ -895,6 +1000,59 @@ private:
         queue( [this]() {
             sendPlaylist();
         } );
+    }
+
+    /**
+     * Media names in a saved playlist, or an empty list when the playlist
+     * cannot be read or is not in the expected shape.
+     */
+    std::vector<std::string> readPlaylistMedia( const std::string& name ) {
+        std::vector<std::string> items;
+
+        // On-the-fly playlists ("Song.fseq/Song.mp3") are not saved files.
+        if ( name.find( '/' ) != std::string::npos ) {
+            return items;
+        }
+
+        auto client = newClient( LOCAL_API );
+        auto request = drogon::HttpRequest::newHttpRequest();
+
+        request->setPathEncode( false );
+        request->setPath( "/api/playlist/" + percentEncode( name ) );
+
+        auto [ result, response ] = client->sendRequest( request, HTTP_TIMEOUT_S );
+
+        if ( result != drogon::ReqResult::Ok || ! response || response->statusCode() != drogon::k200OK ) {
+            LogWarn( VB_PLUGIN, "ListenSync: could not read playlist %s\n", name.c_str() );
+
+            return items;
+        }
+
+        Json::Value root;
+
+        if ( ! LoadJsonFromString( std::string( response->body() ), root ) || ! root.isObject() ) {
+            LogWarn( VB_PLUGIN, "ListenSync: playlist %s is not a JSON object\n", name.c_str() );
+
+            return items;
+        }
+
+        for ( const char* section : { "leadIn", "mainPlaylist", "leadOut" } ) {
+            const Json::Value& entries = jsonMember( root, section );
+
+            if ( ! entries.isArray() ) {
+                continue;
+            }
+
+            for ( const Json::Value& entry : entries ) {
+                std::string media = jsonString( entry, "mediaName" );
+
+                if ( ! media.empty() ) {
+                    items.push_back( media );
+                }
+            }
+        }
+
+        return items;
     }
 
     void setUploadStatus( const std::string& state, int done, int total, const std::string& error = "" ) {
@@ -963,18 +1121,27 @@ private:
 
         std::vector<std::pair<std::string, std::string>> pending;
 
-        for ( const Json::Value& file : localFiles[ "files" ] ) {
-            std::string name = file.get( "name", "" ).asString();
+        const Json::Value& files = jsonMember( localFiles, "files" );
+        const Json::Value& uploaded = jsonMember( manifest, "files" );
 
-            if ( name.empty() || name.find( '/' ) != std::string::npos ||
+        if ( ! files.isArray() ) {
+            setUploadStatus( "error", 0, 0, "unexpected FPP music file list" );
+
+            return;
+        }
+
+        for ( const Json::Value& file : files ) {
+            std::string name = jsonString( file, "name" );
+            long long size = jsonInteger( file, "sizeBytes" );
+
+            if ( name.empty() || size < 0 || name.find( '/' ) != std::string::npos ||
                  AUDIO_EXTENSIONS.count( lowerExtension( name ) ) == 0 ) {
                 continue;
             }
 
-            std::string version = std::to_string( file.get( "sizeBytes", 0 ).asLargestInt() ) + "-" +
-                                  file.get( "mtime", "" ).asString();
+            std::string version = std::to_string( size ) + "-" + jsonString( file, "mtime" );
 
-            if ( manifest[ "files" ].get( name, "" ).asString() != version ) {
+            if ( jsonString( uploaded, name.c_str() ) != version ) {
                 pending.emplace_back( name, version );
             }
         }
@@ -1037,6 +1204,14 @@ private:
     // ---- HTTP API (drogon request threads) ----------------------------------
 
     void handleApi( const HttpRequestPtr& req, HttpCallback&& callback ) {
+        try {
+            routeApi( req, std::move( callback ) );
+        } catch ( const std::exception& error ) {
+            LogErr( VB_PLUGIN, "ListenSync: error in API handler: %s\n", error.what() );
+        }
+    }
+
+    void routeApi( const HttpRequestPtr& req, HttpCallback&& callback ) {
         std::string path = req->path();
         std::string action = path.size() > API_PATH.size() ? path.substr( path.find_last_of( '/' ) + 1 ) : "status";
 
@@ -1151,6 +1326,7 @@ private:
     bool workerStop = false;
     bool uploadRequested = false;
     std::string playlistRequested;
+    std::string playlistFallbackMedia;
     std::atomic<bool> stopping { false };
 };
 
